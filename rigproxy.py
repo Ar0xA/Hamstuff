@@ -1,5 +1,5 @@
 """
-Ugly but works, to allow you to use multiple clients to talk to the same right. For use with say, different FT8 clients through Gridtracker2's Call Roster
+Ugly but works, to allow you to use multiple clients to talk to the same rig. For use with say, different FT8 clients through Gridtracker2's Call Roster
 
 Setup and use:
 - start hamlib's rigctld on 4535
