@@ -1,192 +1,323 @@
-"""
-Ugly but works, to allow you to use multiple clients to talk to the same rig. For use with say, different FT8 clients through Gridtracker2's Call Roster
-
-Setup and use:
-- start hamlib's rigctld on 4535
-- start the rigproxy
-- start the clients, they need to be configured to connect to the proxy on 4532 (rigctl's default port)
-
-Note: 
-- CAT changes work from any client
-- When 1 client is in Tx mode, the others keep going but obviously no data is send to them. They do not crash because the proxy tells them the rig is in TX mode.
-
-Update:
-1. Now gracefully tries to reconnect to back-end rigctld, when disconnected instead of directly throwing an error in the clients.
-"""
-
 import asyncio
+import threading
 import logging
+import json
+import os
+import customtkinter as ctk
 
-# --- CONFIGURATION ---
-PROXY_PORT = 4532        # The port your WSJT-X instances point to (Hamlib Rigctld)
-REAL_RIGCTLD_ADDR = ("127.0.0.1", 4535)  # The actual rigctld port talking to the radio
-POLL_INTERVAL = 1.0      # How often the proxy updates its cache from the real radio
-# ---------------------
-
+# Configure basic logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-class RigState:
+# --- UI Theme Configuration ---
+ctk.set_appearance_mode("Dark")
+ctk.set_default_color_theme("blue")
+
+CONFIG_FILE = "rigproxy_config.json"
+
+class ProxyState:
+    """Shared state between the Asyncio backend and the GUI frontend."""
     def __init__(self):
-        self.cached_freq = "14074000\n"  # Default fallback frequency
-        self.cached_mode = "USB\n1500\n" # Default fallback mode
-        self.cached_ptt = "0\n"          # Default: Rig is in RX (0)
+        self.cached_freq = "14074000\n"
+        self.cached_mode = "USB\n1500\n"
+        self.cached_ptt = "0\n"
         self.is_transmitting = False
+        
+        # Connection status for UI
+        self.backend_connected = False
+        self.connected_clients = set()
+        
+        # Asyncio internals
         self.real_reader = None
         self.real_writer = None
-        self.lock = asyncio.Lock()       # Prevents collisions
+        self.lock = asyncio.Lock()
+        self.is_running = False
 
-async def update_cache_loop(state):
-    """Background loop that polls the real radio only when not transmitting."""
-    while True:
-        try:
-            if not state.real_writer:
-                state.real_reader, state.real_writer = await asyncio.open_connection(*REAL_RIGCTLD_ADDR)
-                logging.info("Connected to physical rigctld.")
+class AsyncProxyServer:
+    """The core asynchronous proxy logic."""
+    def __init__(self, state, proxy_host, proxy_port, real_host, real_port):
+        self.state = state
+        self.proxy_host = proxy_host
+        self.proxy_port = int(proxy_port)
+        self.real_host = real_host
+        self.real_port = int(real_port)
+        self.server = None
+        self.poll_interval = 1.0
 
-            # Only poll physical rig if the proxy hasn't flagged an active TX session
-            if not state.is_transmitting and state.real_writer:
-                async with state.lock:
-                    # 1. Query Frequency
-                    state.real_writer.write(b"f\n")
-                    await state.real_writer.drain()
-                    freq = await state.real_reader.readline()
-                    if freq:
-                        state.cached_freq = freq.decode()
+    async def update_cache_loop(self):
+        while self.state.is_running:
+            try:
+                if not self.state.real_writer:
+                    self.state.real_reader, self.state.real_writer = await asyncio.open_connection(self.real_host, self.real_port)
+                    self.state.backend_connected = True
+                    logging.info("Connected to physical rigctld.")
 
-                    # 2. Query Mode
-                    state.real_writer.write(b"m\n")
-                    await state.real_writer.drain()
-                    mode = await state.real_reader.readline()
-                    passband = await state.real_reader.readline()
-                    if mode and passband:
-                        state.cached_mode = mode.decode() + passband.decode()
+                if not self.state.is_transmitting and self.state.real_writer:
+                    async with self.state.lock:
+                        self.state.real_writer.write(b"f\n")
+                        await self.state.real_writer.drain()
+                        freq = await self.state.real_reader.readline()
+                        if freq: self.state.cached_freq = freq.decode()
 
-                    # 3. Query Real PTT State (Just to keep sync if toggled manually on rig)
-                    state.real_writer.write(b"t\n")
-                    await state.real_writer.drain()
-                    ptt = await state.real_reader.readline()
-                    if ptt:
-                        state.cached_ptt = ptt.decode()
+                        self.state.real_writer.write(b"m\n")
+                        await self.state.real_writer.drain()
+                        mode = await self.state.real_reader.readline()
+                        passband = await self.state.real_reader.readline()
+                        if mode and passband: self.state.cached_mode = mode.decode() + passband.decode()
 
-        except Exception as e:
-            logging.error(f"Error polling real rigctld: {e}")
-            state.real_writer = None  # Force reconnection next loop
-            
-        await asyncio.sleep(POLL_INTERVAL)
+                        self.state.real_writer.write(b"t\n")
+                        await self.state.real_writer.drain()
+                        ptt = await self.state.real_reader.readline()
+                        if ptt: self.state.cached_ptt = ptt.decode()
 
-async def forward_and_gather_response(state, data_to_send, client_writer):
-    """
-    Forwards commands to the physical rig. If the physical connection is dead,
-    it attempts an immediate on-the-spot reconnection before responding.
-    """
-    # 1. If connection is dead, attempt an immediate, aggressive reconnect
-    if not state.real_writer:
-        logging.info("Client requested command but physical connection is dead. Attempting immediate reconnect...")
-        try:
-            state.real_reader, state.real_writer = await asyncio.open_connection(*REAL_RIGCTLD_ADDR)
-            logging.info("Successfully reconnected to physical rigctld on-demand.")
-        except Exception as e:
-            logging.error(f"On-demand reconnect failed: {e}")
-            # Only send error if the physical rigctld is actually completely shut down
-            client_writer.write(b"RPRT -1\n")
-            await client_writer.drain()
-            return
-
-    # 2. Proceed with sending the command under the safety lock
-    async with state.lock:
-        try:
-            state.real_writer.write(data_to_send)
-            await state.real_writer.drain()
-
-            first_line = await state.real_reader.readline()
-            if not first_line: # Handle sudden socket drop during read
-                raise ConnectionError("Physical rig closed connection during read.")
+            except Exception:
+                self.state.backend_connected = False
+                self.state.real_writer = None
                 
-            client_writer.write(first_line)
-            await client_writer.drain()
+            await asyncio.sleep(self.poll_interval)
 
-            while True:
-                try:
-                    next_line = await asyncio.wait_for(state.real_reader.readline(), timeout=0.05)
-                    if not next_line:
+    async def forward_and_gather_response(self, data_to_send, client_writer):
+        if not self.state.real_writer:
+            try:
+                self.state.real_reader, self.state.real_writer = await asyncio.open_connection(self.real_host, self.real_port)
+                self.state.backend_connected = True
+            except Exception:
+                client_writer.write(b"RPRT -1\n")
+                await client_writer.drain()
+                return
+
+        async with self.state.lock:
+            try:
+                self.state.real_writer.write(data_to_send)
+                await self.state.real_writer.drain()
+
+                first_line = await self.state.real_reader.readline()
+                if not first_line: raise ConnectionError()
+                    
+                client_writer.write(first_line)
+                await client_writer.drain()
+
+                while True:
+                    try:
+                        next_line = await asyncio.wait_for(self.state.real_reader.readline(), timeout=0.05)
+                        if not next_line: break
+                        client_writer.write(next_line)
+                        await client_writer.drain()
+                    except asyncio.TimeoutError:
                         break
-                    client_writer.write(next_line)
-                    await client_writer.drain()
-                except asyncio.TimeoutError:
-                    break
-        except Exception as e:
-            logging.error(f"Error communicating with physical rigctld: {e}")
-            state.real_writer = None  # Flag connection as dead for the next attempt
-            client_writer.write(b"RPRT -1\n")
-            await client_writer.drain()
+            except Exception:
+                self.state.backend_connected = False
+                self.state.real_writer = None
+                client_writer.write(b"RPRT -1\n")
+                await client_writer.drain()
 
-
-async def handle_client(reader, writer, state):
-    """Handles incoming connections from WSJT-X/JTDX clients."""
-    client_addr = writer.get_extra_info('peername')
-    logging.info(f"New Rigctld client connected from: {client_addr}")
-    
-    try:
-        while True:
-            data = await reader.readline()
-            if not data:
-                break
-            
-            cmd = data.decode().strip()
-            
-            # 1. Handle Read Commands (Served instantly from Cache!)
-            if cmd == "f":
-                writer.write(state.cached_freq.encode())
-                await writer.drain()
-            elif cmd == "m":
-                writer.write(state.cached_mode.encode())
-                await writer.drain()
-            elif cmd == "t":
-                # Serve the cached PTT state instantly to all clients
-                writer.write(state.cached_ptt.encode())
-                await writer.drain()
-                
-            # 2. Handle PTT write / Configuration Commands
-            else:
-                # Intercept direct PTT write commands (e.g. 'T 1' or 'T 0')
-                if cmd.startswith("T "):
-                    tx_status = cmd.split()[1] # "1" for TX, "0" for RX
-                    state.is_transmitting = (tx_status == "1")
-                    # Update our local PTT cache so OTHER clients see it instantly when they poll 't'
-                    state.cached_ptt = f"{tx_status}\n"
-                    logging.info(f"PTT state updated by {client_addr} -> TX: {state.is_transmitting}")
-
-                # Dynamically forward command to real rig and reply to sender
-                await forward_and_gather_response(state, data, writer)
-
-    except asyncio.CancelledError:
-        pass
-    except Exception as e:
-        logging.debug(f"Error handling client {client_addr}: {e}")
-    finally:
-        logging.info(f"Rigctld client disconnected: {client_addr}")
+    async def handle_client(self, reader, writer):
+        client_addr = f"{writer.get_extra_info('peername')[0]}:{writer.get_extra_info('peername')[1]}"
+        self.state.connected_clients.add(client_addr)
+        
         try:
-            writer.close()
-            await writer.wait_closed()
+            while self.state.is_running:
+                data = await reader.readline()
+                if not data: break
+                
+                cmd = data.decode().strip()
+                if cmd == "f":
+                    writer.write(self.state.cached_freq.encode())
+                    await writer.drain()
+                elif cmd == "m":
+                    writer.write(self.state.cached_mode.encode())
+                    await writer.drain()
+                elif cmd == "t":
+                    writer.write(self.state.cached_ptt.encode())
+                    await writer.drain()
+                else:
+                    if cmd.startswith("T "):
+                        tx_status = cmd.split()[1]
+                        self.state.is_transmitting = (tx_status == "1")
+                        self.state.cached_ptt = f"{tx_status}\n"
+                    await self.forward_and_gather_response(data, writer)
         except Exception:
             pass
+        finally:
+            self.state.connected_clients.discard(client_addr)
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception: pass
 
-async def main():
-    state = RigState()
-    asyncio.create_task(update_cache_loop(state))
-    
-    server = await asyncio.start_server(
-        lambda r, w: handle_client(r, w, state), 
-        '127.0.0.1', 
-        PROXY_PORT
-    )
-    
-    logging.info(f"Rigctld Caching Proxy listening on 127.0.0.1:{PROXY_PORT}")
-    async with server:
-        await server.serve_forever()
+    async def start(self):
+        self.state.is_running = True
+        asyncio.create_task(self.update_cache_loop())
+        self.server = await asyncio.start_server(self.handle_client, self.proxy_host, self.proxy_port)
+        async with self.server:
+            while self.state.is_running:
+                await asyncio.sleep(0.5)
+        self.server.close()
+        await self.server.wait_closed()
+
+class ProxyApp(ctk.CTk):
+    """The modern GUI interface."""
+    def __init__(self):
+        super().__init__()
+        self.title("Rigctld Multiplexer Proxy by PD3AN")
+        self.geometry("600x420")
+        self.resizable(False, False)
+
+        self.proxy_state = ProxyState()
+        self.async_loop = None
+        self.proxy_thread = None
+
+        self.setup_ui()
+        self.load_config()
+        self.update_ui_loop()
+
+    def setup_ui(self):
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        # --- LEFT FRAME: SETTINGS ---
+        self.settings_frame = ctk.CTkFrame(self)
+        self.settings_frame.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")
+
+        ctk.CTkLabel(self.settings_frame, text="Proxy Settings", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(15, 10))
+
+        ctk.CTkLabel(self.settings_frame, text="Listen IP:").pack(anchor="w", padx=20)
+        self.proxy_ip_entry = ctk.CTkEntry(self.settings_frame)
+        self.proxy_ip_entry.pack(fill="x", padx=20, pady=(0, 10))
+
+        ctk.CTkLabel(self.settings_frame, text="Listen Port:").pack(anchor="w", padx=20)
+        self.proxy_port_entry = ctk.CTkEntry(self.settings_frame)
+        self.proxy_port_entry.pack(fill="x", padx=20, pady=(0, 20))
+
+        ctk.CTkLabel(self.settings_frame, text="Physical Rigctld IP:").pack(anchor="w", padx=20)
+        self.real_ip_entry = ctk.CTkEntry(self.settings_frame)
+        self.real_ip_entry.pack(fill="x", padx=20, pady=(0, 10))
+
+        ctk.CTkLabel(self.settings_frame, text="Physical Rigctld Port:").pack(anchor="w", padx=20)
+        self.real_port_entry = ctk.CTkEntry(self.settings_frame)
+        self.real_port_entry.pack(fill="x", padx=20, pady=(0, 20))
+
+        self.toggle_btn = ctk.CTkButton(self.settings_frame, text="Start Proxy", fg_color="green", hover_color="darkgreen", command=self.toggle_proxy)
+        self.toggle_btn.pack(pady=10)
+
+        # --- RIGHT FRAME: STATUS ---
+        self.status_frame = ctk.CTkFrame(self)
+        self.status_frame.grid(row=0, column=1, padx=(0, 20), pady=20, sticky="nsew")
+
+        ctk.CTkLabel(self.status_frame, text="Live Status", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(15, 10))
+
+        self.backend_status_label = ctk.CTkLabel(self.status_frame, text="Backend: OFFLINE", text_color="gray")
+        self.backend_status_label.pack(pady=(10, 20))
+
+        self.client_count_label = ctk.CTkLabel(self.status_frame, text="Connected Clients: 0", font=ctk.CTkFont(weight="bold"))
+        self.client_count_label.pack(pady=(5, 5))
+
+        self.client_listbox = ctk.CTkTextbox(self.status_frame, width=220, height=150, state="disabled")
+        self.client_listbox.pack(padx=20, pady=(0, 20))
+
+    def load_config(self):
+        """Loads settings from JSON or sets defaults if file is missing."""
+        config = {
+            "proxy_ip": "127.0.0.1",
+            "proxy_port": "4532",
+            "real_ip": "127.0.0.1",
+            "real_port": "4535"
+        }
+        
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, "r") as f:
+                    loaded_config = json.load(f)
+                    config.update(loaded_config)
+            except Exception as e:
+                logging.error(f"Error loading config file: {e}")
+
+        # Populate the UI fields
+        self.proxy_ip_entry.insert(0, config["proxy_ip"])
+        self.proxy_port_entry.insert(0, config["proxy_port"])
+        self.real_ip_entry.insert(0, config["real_ip"])
+        self.real_port_entry.insert(0, config["real_port"])
+
+    def save_config(self):
+        """Saves current UI fields to JSON file."""
+        config = {
+            "proxy_ip": self.proxy_ip_entry.get(),
+            "proxy_port": self.proxy_port_entry.get(),
+            "real_ip": self.real_ip_entry.get(),
+            "real_port": self.real_port_entry.get()
+        }
+        try:
+            with open(CONFIG_FILE, "w") as f:
+                json.dump(config, f, indent=4)
+        except Exception as e:
+            logging.error(f"Error saving config file: {e}")
+
+    def toggle_proxy(self):
+        if not self.proxy_state.is_running:
+            # SAVE SETTINGS AND LOCK UI
+            self.save_config()
+            
+            self.toggle_btn.configure(text="Stop Proxy", fg_color="red", hover_color="darkred")
+            self.proxy_ip_entry.configure(state="disabled")
+            self.proxy_port_entry.configure(state="disabled")
+            self.real_ip_entry.configure(state="disabled")
+            self.real_port_entry.configure(state="disabled")
+            
+            # START PROXY
+            self.proxy_thread = threading.Thread(target=self.run_asyncio_loop, daemon=True)
+            self.proxy_thread.start()
+        else:
+            # STOP PROXY AND UNLOCK UI
+            self.proxy_state.is_running = False
+            self.toggle_btn.configure(text="Start Proxy", fg_color="green", hover_color="darkgreen")
+            
+            self.proxy_ip_entry.configure(state="normal")
+            self.proxy_port_entry.configure(state="normal")
+            self.real_ip_entry.configure(state="normal")
+            self.real_port_entry.configure(state="normal")
+            
+            self.backend_status_label.configure(text="Backend: OFFLINE", text_color="gray")
+
+    def run_asyncio_loop(self):
+        self.async_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.async_loop)
+        
+        server = AsyncProxyServer(
+            self.proxy_state,
+            self.proxy_ip_entry.get(),
+            self.proxy_port_entry.get(),
+            self.real_ip_entry.get(),
+            self.real_port_entry.get()
+        )
+        self.async_loop.run_until_complete(server.start())
+        self.async_loop.close()
+
+    def update_ui_loop(self):
+        if self.proxy_state.is_running:
+            if self.proxy_state.backend_connected:
+                self.backend_status_label.configure(text="Backend: CONNECTED", text_color="green")
+            else:
+                self.backend_status_label.configure(text="Backend: DISCONNECTED", text_color="orange")
+
+            self.client_count_label.configure(text=f"Connected Clients: {len(self.proxy_state.connected_clients)}")
+            
+            self.client_listbox.configure(state="normal")
+            self.client_listbox.delete("1.0", "end")
+            if self.proxy_state.connected_clients:
+                for client in self.proxy_state.connected_clients:
+                    self.client_listbox.insert("end", f"• {client}\n")
+            else:
+                self.client_listbox.insert("end", "Waiting for clients...")
+            self.client_listbox.configure(state="disabled")
+        else:
+            self.client_listbox.configure(state="normal")
+            self.client_listbox.delete("1.0", "end")
+            self.client_listbox.insert("end", "Proxy stopped.")
+            self.client_listbox.configure(state="disabled")
+            self.client_count_label.configure(text="Connected Clients: 0")
+
+        self.after(500, self.update_ui_loop)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.info("Shutting down proxy.")
+    app = ProxyApp()
+    app.mainloop()
