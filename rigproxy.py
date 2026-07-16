@@ -10,6 +10,8 @@ Note:
 - CAT changes work from any client
 - When 1 client is in Tx mode, the others keep going but obviously no data is send to them. They do not crash because the proxy tells them the rig is in TX mode.
 
+Update:
+1. Now gracefully tries to reconnect to back-end rigctld, when disconnected instead of directly throwing an error in the clients.
 """
 
 import asyncio
