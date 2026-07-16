@@ -4,7 +4,7 @@ Ugly but works, to allow you to use multiple clients to talk to the same rig. Fo
 Setup and use:
 - start hamlib's rigctld on 4535
 - start the rigproxy
-- start the clients, they connect to the proxy on 4532 (rigctl's default port)
+- start the clients, they need to be configured to connect to the proxy on 4532 (rigctl's default port)
 
 Note: 
 - CAT changes work from any client
