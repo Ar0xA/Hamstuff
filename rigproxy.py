@@ -73,29 +73,51 @@ async def update_cache_loop(state):
         await asyncio.sleep(POLL_INTERVAL)
 
 async def forward_and_gather_response(state, data_to_send, client_writer):
-    """Forwards commands to the physical rig and safely gathers multi-line responses."""
+    """
+    Forwards commands to the physical rig. If the physical connection is dead,
+    it attempts an immediate on-the-spot reconnection before responding.
+    """
+    # 1. If connection is dead, attempt an immediate, aggressive reconnect
     if not state.real_writer:
-        client_writer.write(b"RPRT -1\n")
-        await client_writer.drain()
-        return
+        logging.info("Client requested command but physical connection is dead. Attempting immediate reconnect...")
+        try:
+            state.real_reader, state.real_writer = await asyncio.open_connection(*REAL_RIGCTLD_ADDR)
+            logging.info("Successfully reconnected to physical rigctld on-demand.")
+        except Exception as e:
+            logging.error(f"On-demand reconnect failed: {e}")
+            # Only send error if the physical rigctld is actually completely shut down
+            client_writer.write(b"RPRT -1\n")
+            await client_writer.drain()
+            return
 
+    # 2. Proceed with sending the command under the safety lock
     async with state.lock:
-        state.real_writer.write(data_to_send)
-        await state.real_writer.drain()
+        try:
+            state.real_writer.write(data_to_send)
+            await state.real_writer.drain()
 
-        first_line = await state.real_reader.readline()
-        client_writer.write(first_line)
-        await client_writer.drain()
+            first_line = await state.real_reader.readline()
+            if not first_line: # Handle sudden socket drop during read
+                raise ConnectionError("Physical rig closed connection during read.")
+                
+            client_writer.write(first_line)
+            await client_writer.drain()
 
-        while True:
-            try:
-                next_line = await asyncio.wait_for(state.real_reader.readline(), timeout=0.05)
-                if not next_line:
+            while True:
+                try:
+                    next_line = await asyncio.wait_for(state.real_reader.readline(), timeout=0.05)
+                    if not next_line:
+                        break
+                    client_writer.write(next_line)
+                    await client_writer.drain()
+                except asyncio.TimeoutError:
                     break
-                client_writer.write(next_line)
-                await client_writer.drain()
-            except asyncio.TimeoutError:
-                break
+        except Exception as e:
+            logging.error(f"Error communicating with physical rigctld: {e}")
+            state.real_writer = None  # Flag connection as dead for the next attempt
+            client_writer.write(b"RPRT -1\n")
+            await client_writer.drain()
+
 
 async def handle_client(reader, writer, state):
     """Handles incoming connections from WSJT-X/JTDX clients."""
