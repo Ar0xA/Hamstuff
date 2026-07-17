@@ -1,0 +1,53 @@
+Comparing various ft8 decoders for funsies.
+
+Result on 20m with the same rig (Yaesu ftx1)
+
+--
+Parsing files and analyzing timing sync. This might take a moment...
+
+--- PARSE YIELD (Sanity Check) ---
+WSJT-X    : 4,618 parsed out of 4,618 potential RX lines (100.0%)
+MSHV      : 2,167 parsed out of 2,167 potential RX lines (100.0%)
+JTDX      : 4,460 parsed out of 4,460 potential RX lines (100.0%)
+Nexus     : 3,122 parsed out of 3,122 potential RX lines (100.0%)
+
+==================================================
+ FT8 DECODER PERFORMANCE REPORT
+==================================================
+
+Overall Unique Signals Heard Across All Clients: 5,087
+Signals Decoded by EVERY Client Simultaneously : 1,928
+Signals shared by WSJT-X and JTDX              : 4,118
+
+--- TOTAL DECODES ---
+WSJT-X    : 4,618 decodes
+MSHV      : 2,167 decodes
+JTDX      : 4,460 decodes
+Nexus     : 3,122 decodes
+
+--- UNIQUE DECODES (Signals NO ONE else decoded) ---
+WSJT-X    : 349 decodes
+MSHV      : 8 decodes
+JTDX      : 327 decodes
+Nexus     : 109 decodes
+
+--- WEAK SIGNAL PERFORMANCE (<= -20 dB) ---
+WSJT-X    : 343 weak signals decoded
+MSHV      : 80 weak signals decoded
+JTDX      : 284 weak signals decoded
+Nexus     : 216 weak signals decoded
+
+--- AVERAGE DECODED SNR ---
+WSJT-X    : -12.14 dB
+MSHV      : -4.25 dB
+JTDX      : -11.96 dB
+Nexus     : -8.64 dB
+
+--- MISSED DECODES (Heard by at least one other client) ---
+WSJT-X    : 469 signals missed
+MSHV      : 2,922 signals missed
+JTDX      : 628 signals missed
+Nexus     : 1,965 signals missed
+
+==================================================
+Audit log saved to 'decode_audit_log.csv'. Open this in Excel to manually verify the matching logic.
