@@ -1,0 +1,66 @@
+C:\Users\ar0xa\Documents\comparedecoders>python compare_wsjtx2.py
+Parsing files...
+
+--- PARSE YIELD (sanity check) ---
+Normal  : 3,879 parsed / 3,879 Rx lines (100.0%), 0 Tx lines skipped, 0 unparsed Rx-looking lines
+2-Pass  : 3,913 parsed / 3,913 Rx lines (100.0%), 0 Tx lines skipped, 0 unparsed Rx-looking lines
+3-Pass  : 3,900 parsed / 3,900 Rx lines (100.0%), 0 Tx lines skipped, 0 unparsed Rx-looking lines
+Late    : 3,870 parsed / 3,870 Rx lines (100.0%), 0 Tx lines skipped, 0 unparsed Rx-looking lines
+
+--- ALIGNMENT (reference = Normal) ---
+Normal  : first decode at raw 43005s, span 30.8 min
+2-Pass  : first decode at raw 37065s, span 30.8 min
+3-Pass  : first decode at raw 39030s, span 30.8 min
+Late    : first decode at raw 41040s, span 30.8 min
+Normal  : reference file, shift = 0 cycles
+2-Pass  : best shift = +0s (3,718 matches vs 3,718 matches at shift=0)
+3-Pass  : best shift = +0s (3,715 matches vs 3,715 matches at shift=0)
+Late    : best shift = +0s (3,748 matches vs 3,748 matches at shift=0)
+
+=======================================================
+ WSJT-X DECODE-START SETTING COMPARISON (replayed WAV)
+=======================================================
+
+Overall Unique Signals Heard Across All Settings: 4,173
+Signals Decoded by ALL FOUR Settings Simultaneously: 3,608
+
+--- TOTAL DECODES ---
+Normal  : 3,879 decodes
+2-Pass  : 3,913 decodes
+3-Pass  : 3,900 decodes
+Late    : 3,870 decodes
+
+--- UNIQUE DECODES (this setting ONLY) ---
+Normal  : 49 decodes
+2-Pass  : 54 decodes
+3-Pass  : 52 decodes
+Late    : 32 decodes
+
+--- WEAK SIGNAL PERFORMANCE (<= -20 dB) ---
+Normal  : 342 weak signals decoded
+2-Pass  : 394 weak signals decoded
+3-Pass  : 359 weak signals decoded
+Late    : 347 weak signals decoded
+
+--- DECODED SNR (mean / median / stdev) ---
+Normal  : mean -11.11 dB / median -12.00 dB / stdev 6.52 dB
+2-Pass  : mean -8.28 dB / median -11.00 dB / stdev 10.07 dB
+3-Pass  : mean -8.27 dB / median -11.00 dB / stdev 10.07 dB
+Late    : mean -11.11 dB / median -12.00 dB / stdev 6.54 dB
+
+--- MISSED DECODES (heard by at least one other setting) ---
+Normal  : 294 signals missed
+2-Pass  : 260 signals missed
+3-Pass  : 273 signals missed
+Late    : 303 signals missed
+
+--- PAIRWISE OVERLAP (signals both settings decoded) ---
+2-Pass   & 3-Pass  : 3,769
+Normal   & Late    : 3,748
+2-Pass   & Late    : 3,731
+3-Pass   & Late    : 3,719
+Normal   & 2-Pass  : 3,718
+Normal   & 3-Pass  : 3,715
+
+=======================================================
+Audit log saved to 'decode_settings_replay_audit.csv' -- open in Excel to spot-check alignment and matches.
