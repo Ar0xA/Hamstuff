@@ -1,4 +1,16 @@
-Recorded 30 min wav file. Played it for each wsjtx session, only changing the decoder setting. Then parsing the ALL.TXT at the end. These are the results:
+Recorded 30 min wav file. Played it for each wsjtx session, only changing the decoder setting. Then parsing the ALL.TXT at the end. 
+
+WSJTX SETTINGS
+==============
+Decode: Deep
+Use multithreaded FT8 decoder: checked
+Enable AP: checked
+Parameters: Number of threads: Auto, Decoding cycles 3, QSO RX freq sensitivity High, decoder sensitiviy: use low treshholds, Decoder start: [WE CHANGE THIS] 
+Wideband DX call search: checked. 
+Hide FT8 dupe messages: checked
+
+
+These are the results:
 
 
 C:\Users\ar0xa\Documents\comparedecoders>python compare_wsjtx2.py
