@@ -1,3 +1,34 @@
+Settings:
+
+JTDX
+====
+FT8 Threads: Auto
+FT8 decoding: Decoding cycles 3, SWL decoding cycles 3, QSO RX freq sensitivity high, Decoder sensitivity: use low treshhold
+Early start of decoder: unchecked
+wideband dx call search: checked
+
+
+WSJTX
+=====
+Decode: Deep
+Use multithreaded FT8 decoder: checked
+Enable AP: checked
+Parameters: Number of threads: Auto, Decoding cycles 3, QSO RX freq sensitivity High, decoder sensitiviy: use low treshholds, Decoder start: late stage. 
+Wideband DX call search: checked. 
+Hide FT8 dupe messages: checked
+
+NEXUS
+=====
+Decoder Depth: Deep
+
+MSHV
+====
+Decode
+Deep MSK FT Q65: checked
+Use Three-stage decoding FT8: checked
+Parameters SD Decoder FT8: Decoder cycles 3, Sensitivity use low tresholds
+-----
+
 C:\Users\ar0xa\Documents\comparedecoders>python compare_decodes.py
 Parsing files and analyzing timing sync. This might take a moment...
 
