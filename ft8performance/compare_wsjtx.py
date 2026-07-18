@@ -1,243 +1,211 @@
-##compares various wstjx settings. Use the same .wav file as a base for a good comparison
+#compare WSJT-X decoder settings (Normal / 2-Pass / 3-Pass / Late)
+#
+# IMPORTANT, READ BEFORE MODIFYING: these four files are SERIAL recordings
+# -- four separate ~30-minute real-world sessions, one per setting, run one
+# after another (not simultaneously, not from an identical replayed audio
+# file). That means the same real signal cannot appear in more than one
+# file: each session's RF content is unique to that window in time.
+#
+# Because of that, per-signal matching (joining on time+frequency+message
+# to find "decoded by all" / "unique" / "missed" signals) is NOT valid for
+# this data -- it will always show ~100% unique / ~0% overlap no matter how
+# correct the parser is, because there is no shared signal to match. That
+# section has been deliberately removed rather than patched, since a
+# "cleaner-looking" number here would just be a more convincing wrong
+# answer. If you switch to a genuinely parallel capture (same audio fed to
+# all four instances at once, or one recording replayed identically into
+# each) THAT data would support per-signal matching again -- see the
+# separate compare_decodes.py / earlier per-signal-join version for that
+# case, don't bolt matching back onto this file for serial data.
+#
+# What IS valid across separate sessions: duration-normalized decode RATE
+# and distribution-shape comparisons (mean/median/stdev SNR, weak-signal
+# SHARE of that session's own total). Even these carry one irreducible
+# caveat: differences between settings could still be band-condition drift
+# between sessions, not the setting itself. No code removes that; only
+# collecting the data differently (parallel/replay) would.
+
 import re
 import os
-import csv
 from collections import defaultdict
 import statistics
 
-# --- UPDATED TO COMPARE WSJT-X SETTINGS ---
 CLIENT_FILES = {
     "Normal": "wsjtx_norm.txt",
-    "2-Pass": "wsjtx_2pass.txt",
-    "3-Pass": "wsjtx3_pass.txt",
+    "2-Pass": "wsjtx_2stage.txt",
+    "3-Pass": "wsjtx_3stage.txt",
     "Late": "wsjtx_late.txt"
-}
-
-# All of them use the standard WSJT-X log format
-CLIENT_FORMATS = {
-    "Normal": "standard",
-    "2-Pass": "standard",
-    "3-Pass": "standard",
-    "Late": "standard"
 }
 
 WEAK_SNR_THRESHOLD = -20
 
+# WSJT-X fixed-column log layout, confirmed from real sample lines earlier
+# in this session. Date group widened to 6-8 digits (YYMMDD or YYYYMMDD)
+# for robustness; day-of-month is always the last two digits either way.
 STANDARD_PATTERN = re.compile(
-    r'^(?P<date>\d{6,8})_(?P<time>\d{6})\s+'
-    r'[\d.]+\s+Rx\s+\S+\s+'
-    r'(?P<snr>-?\d+)\s+'
-    r'[^ \t]+\s+'                
-    r'\d+\s+'                    
-    r'(?P<msg>.+)$',
+    r'^(\d{6,8})_(\d{6})\s+'    # group 1: date, group 2: time HHMMSS
+    r'[\d.]+\s+'                 # dial frequency (MHz) - not needed
+    r'Rx\s+'                     # direction marker (Rx lines only)
+    r'\S+\s+'                    # mode (FT8, FT4, etc.) - not needed
+    r'(-?\d+)\s+'                 # group 3: SNR
+    r'(-?\d+\.\d+)\s+'            # group 4: DT (unused, kept for completeness)
+    r'(\d+)\s+'                   # group 5: audio frequency (Hz) - unused here, no join key needed
+    r'(.+)$',                     # group 6: decoded message
     re.IGNORECASE
 )
 
-JTDX_PATTERN = re.compile(
-    r'^(?P<date>\d{6,8})_(?P<time>\d{6})\s+'
-    r'(?P<snr>-?\d+)\s+'
-    r'[^ \t]+\s+'                
-    r'\d+\s+'                    
-    r'~?\s*'                     
-    r'(?P<msg>.+)$',
-    re.IGNORECASE
-)
+TX_LINE_PATTERN = re.compile(r'\bTx\b')
 
-MSHV_PATTERN = re.compile(
-    r'^(?P<day>\d+)\|'
-    r'RX\s+[\d.]+\s+\S+\|'
-    r'(?P<time>\d{6})\|'
-    r'(?P<snr>-?\d+)\|'
-    r'[^|]+\|'                   
-    r'[^|]+\|'                   
-    r'(?P<msg>[^|]+)\|'          
-    r'.*$',                      
-    re.IGNORECASE
-)
 
-def time_to_seconds(time_str):
-    h, m, s = int(time_str[0:2]), int(time_str[2:4]), int(time_str[4:6])
-    return h * 3600 + m * 60 + s
+def time_to_bucket(time_str):
+    """Converts HHMMSS to a 15-second-cycle bucket, as total elapsed seconds
+    since midnight. Used here only to measure session span, not to match
+    across files (see module docstring)."""
+    try:
+        h, m, s = int(time_str[0:2]), int(time_str[2:4]), int(time_str[4:6])
+        total_seconds = h * 3600 + m * 60 + s
+        return (total_seconds // 15) * 15
+    except ValueError:
+        return None
 
-def clean_message(msg):
-    msg = msg.strip().upper()
-    msg = re.sub(r'^[~?]\s*', '', msg)
-    msg = re.sub(r'\s+([AP]\d?|[\?\^\*]+)$', '', msg)
+
+def clean_message(raw_msg):
+    """Strips trailing decode-quality markers seen on WSJT-X-family output."""
+    msg = raw_msg.strip().upper()
+    msg = re.sub(r'\s+(A\d?|[\^*?]+)$', '', msg)
     return msg.strip()
 
-def parse_file(filepath, fmt):
-    if not os.path.exists(filepath):
-        print(f"Warning: File {filepath} not found.")
-        return [], 0, 0
 
-    raw_decodes = []
+def parse_standard_format(filepath):
+    """Parses one WSJT-X log file. Returns (decodes, total_lines, tx_lines,
+    unparsed_rx_lines) for the parse-yield diagnostic."""
+    decodes = []
     total_lines = 0
     tx_lines = 0
+    unparsed_rx_lines = 0
+
+    if not os.path.exists(filepath):
+        print(f"Warning: File {filepath} not found. Skipping...")
+        return decodes, total_lines, tx_lines, unparsed_rx_lines
 
     with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
-                
             total_lines += 1
-            
-            # Count transmit lines to exclude them from the parse yield expectation
-            if " Tx " in line or "|TX " in line or "Transmitting" in line:
-                tx_lines += 1
-                continue
-            
-            if fmt == "standard":
-                match = STANDARD_PATTERN.match(line)
-            elif fmt == "jtdx":
-                match = JTDX_PATTERN.match(line)
-            elif fmt == "mshv":
-                match = MSHV_PATTERN.match(line)
-            else:
-                continue
-                
+
+            match = STANDARD_PATTERN.match(line)
             if not match:
+                if TX_LINE_PATTERN.search(line):
+                    tx_lines += 1
+                else:
+                    unparsed_rx_lines += 1
                 continue
 
-            if fmt == "mshv":
-                day_str = match.group('day')
-            else:
-                day_str = match.group('date')[-2:] 
-                
-            time_str = match.group('time')
-            snr_str = match.group('snr')
-            raw_msg = match.group('msg')
-
+            date_str, time_str, snr_str, dt_str, freq_str, raw_msg = match.groups()
             msg = clean_message(raw_msg)
             if len(msg) <= 3:
                 continue
 
-            try:
-                raw_decodes.append({
-                    'day': day_str,
-                    'total_seconds': time_to_seconds(time_str),
-                    'snr': int(snr_str),
-                    'msg': msg
-                })
-            except ValueError:
+            time_bucket = time_to_bucket(time_str)
+            if time_bucket is None:
                 continue
-                
-    if not raw_decodes:
-        return [], total_lines, tx_lines
-        
-    exact_boundary_count = sum(1 for d in raw_decodes if d['total_seconds'] % 15 == 0)
-    is_write_time_logger = (exact_boundary_count / len(raw_decodes)) < 0.5 
-    
-    final_decodes = []
-    for d in raw_decodes:
-        secs = d['total_seconds']
-        if is_write_time_logger:
-            secs -= 15 
-        d['time_bucket'] = (secs // 15) * 15
-        final_decodes.append(d)
-            
-    return final_decodes, total_lines, tx_lines
+
+            decodes.append({
+                'time_bucket': time_bucket,
+                'snr': int(snr_str),
+                'msg': msg
+            })
+
+    return decodes, total_lines, tx_lines, unparsed_rx_lines
+
+
+def session_span_minutes(decodes):
+    """
+    Approximates session length as (last decode's cycle - first decode's
+    cycle + one cycle). This is a proxy from decode timestamps, not a
+    logged start/stop time -- if a session had a long dead-air stretch at
+    the very start or end with zero decodes, this will slightly
+    UNDERESTIMATE true elapsed recording time. Good enough for a rate
+    comparison; not a substitute for knowing your actual recording length.
+    """
+    if not decodes:
+        return 0.0
+    buckets = [d['time_bucket'] for d in decodes]
+    span_seconds = (max(buckets) - min(buckets)) + 15
+    return span_seconds / 60.0
+
 
 def main():
-    client_names = list(CLIENT_FILES.keys())
-    client_raw_decodes = {}
-    stats = {client: {'total': 0, 'unique': 0, 'weak_count': 0, 'snr_list': [], 'missed': 0} for client in client_names}
+    setting_names = list(CLIENT_FILES.keys())
 
-    print("Parsing files and analyzing timing sync. This might take a moment...")
-    
-    print("\n--- PARSE YIELD (Sanity Check) ---")
-    for client, filename in CLIENT_FILES.items():
-        decodes, total_lines, tx_lines = parse_file(filename, CLIENT_FORMATS[client])
-        client_raw_decodes[client] = decodes
-        
+    print("Parsing files...")
+    client_decodes = {}
+    print("\n--- PARSE YIELD (sanity check) ---")
+    for setting, filename in CLIENT_FILES.items():
+        decodes, total_lines, tx_lines, unparsed_rx_lines = parse_standard_format(filename)
+        client_decodes[setting] = decodes
         rx_lines = total_lines - tx_lines
-        parsed_count = len(decodes)
-        yield_pct = (parsed_count / rx_lines * 100) if rx_lines > 0 else 0
-        
-        print(f"{client:<10}: {parsed_count:,} parsed out of {rx_lines:,} potential RX lines ({yield_pct:.1f}%)")
-        
-        for d in decodes:
-            stats[client]['total'] += 1
-            stats[client]['snr_list'].append(d['snr'])
-            if d['snr'] <= WEAK_SNR_THRESHOLD:
-                stats[client]['weak_count'] += 1
+        yield_pct = (len(decodes) / rx_lines * 100) if rx_lines else 0
+        print(f"{setting:<8}: {len(decodes):,} parsed / {rx_lines:,} Rx lines "
+              f"({yield_pct:.1f}%), {tx_lines:,} Tx lines skipped, "
+              f"{unparsed_rx_lines:,} unparsed Rx-looking lines")
+        if unparsed_rx_lines > 0:
+            print(f"          ^ worth checking manually -- these looked like Rx "
+                  f"entries but didn't match the expected format.")
 
-    master_log = defaultdict(dict)
-    for client, decodes in client_raw_decodes.items():
-        for d in decodes:
-            key = (d['day'], d['time_bucket'], d['msg'])
-            # If a config decodes the same message twice in a 15s window, keep the best SNR
-            if client in master_log[key]:
-                master_log[key][client] = max(master_log[key][client], d['snr'])
-            else:
-                master_log[key][client] = d['snr']
+    stats = {}
+    for s in setting_names:
+        decodes = client_decodes[s]
+        snr_list = [d['snr'] for d in decodes]
+        weak_count = sum(1 for snr in snr_list if snr <= WEAK_SNR_THRESHOLD)
+        span_min = session_span_minutes(decodes)
+        stats[s] = {
+            'total': len(decodes),
+            'snr_list': snr_list,
+            'weak_count': weak_count,
+            'span_min': span_min
+        }
 
-    total_unique_signals = len(master_log)
-    decoded_by_all = 0
+    print("\n" + "="*55)
+    print(" WSJT-X DECODE-START SETTING COMPARISON (serial sessions)")
+    print(" NOTE: sessions are separate time windows, not simultaneous.")
+    print(" Rate and distribution stats below are duration-normalized;")
+    print(" differences may still reflect band-condition drift between")
+    print(" sessions, not only the decoder setting if not testing the same audio file.")
+    print("="*55)
 
-    for key, decoders in master_log.items():
-        decoder_list = list(decoders.keys())
-        
-        if len(decoder_list) == len(client_names):
-            decoded_by_all += 1
-            
-        if len(decoder_list) == 1:
-            stats[decoder_list[0]]['unique'] += 1
+    print("\n--- SESSION SPAN (approx., from first-to-last decode) ---")
+    for s in setting_names:
+        print(f"{s:<8}: {stats[s]['span_min']:.1f} min, {stats[s]['total']:,} decodes")
 
-        for client in client_names:
-            if client not in decoders:
-                stats[client]['missed'] += 1
+    print("\n--- DECODE RATE (decodes per minute) ---")
+    for s in setting_names:
+        span = stats[s]['span_min']
+        rate = stats[s]['total'] / span if span > 0 else 0
+        print(f"{s:<8}: {rate:.2f} decodes/min")
 
-    print("\n" + "="*50)
-    print(" WSJT-X SETTINGS COMPARISON REPORT")
-    print("="*50)
-    
-    print(f"\nOverall Unique Signals Heard Across All Settings: {total_unique_signals:,}")
-    print(f"Signals Decoded by EVERY Setting Simultaneously : {decoded_by_all:,}")
-    
-    print("\n--- TOTAL DECODES ---")
-    for client in client_names:
-        print(f"{client:<10}: {stats[client]['total']:,} decodes")
+    print(f"\n--- WEAK SIGNAL SHARE (<= {WEAK_SNR_THRESHOLD} dB, % of THAT setting's own total) ---")
+    for s in setting_names:
+        total = stats[s]['total']
+        weak = stats[s]['weak_count']
+        pct = (weak / total * 100) if total else 0
+        print(f"{s:<8}: {pct:.1f}% ({weak:,} of {total:,})")
 
-    print("\n--- UNIQUE DECODES (Signals NO OTHER setting caught) ---")
-    for client in client_names:
-        print(f"{client:<10}: {stats[client]['unique']:,} decodes")
+    print("\n--- DECODED SNR (mean / median / stdev) ---")
+    for s in setting_names:
+        vals = stats[s]['snr_list']
+        if vals:
+            mean_snr = statistics.mean(vals)
+            median_snr = statistics.median(vals)
+            stdev_snr = statistics.stdev(vals) if len(vals) > 1 else 0.0
+            print(f"{s:<8}: mean {mean_snr:.2f} dB / median {median_snr:.2f} dB / stdev {stdev_snr:.2f} dB")
+        else:
+            print(f"{s:<8}: N/A")
 
-    print(f"\n--- WEAK SIGNAL PERFORMANCE (<= {WEAK_SNR_THRESHOLD} dB) ---")
-    for client in client_names:
-        print(f"{client:<10}: {stats[client]['weak_count']:,} weak signals decoded")
+    print("\n" + "="*55)
 
-    print("\n--- AVERAGE DECODED SNR ---")
-    for client in client_names:
-        if stats[client]['snr_list']:
-            avg_snr = statistics.mean(stats[client]['snr_list'])
-            print(f"{client:<10}: {avg_snr:.2f} dB")
-
-    print("\n--- MISSED DECODES (Heard by at least one other setting) ---")
-    for client in client_names:
-        print(f"{client:<10}: {stats[client]['missed']:,} signals missed")
-        
-    print("\n" + "="*50)
-
-    # --- CSV Export for Manual Audit ---
-    csv_filename = "settings_audit_log.csv"
-    try:
-        with open(csv_filename, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            headers = ["Day", "Time_Bucket", "Message"] + [f"{c}_SNR" for c in client_names]
-            writer.writerow(headers)
-            
-            # Sort chronologically
-            sorted_keys = sorted(master_log.keys(), key=lambda x: (x[0], x[1]))
-            for key in sorted_keys:
-                day, time_bucket, msg = key
-                row = [day, time_bucket, msg]
-                for client in client_names:
-                    row.append(master_log[key].get(client, ""))
-                writer.writerow(row)
-        print(f"Audit log saved to '{csv_filename}'. Open this in Excel to manually verify the matching logic.")
-    except Exception as e:
-        print(f"Failed to write CSV: {e}")
 
 if __name__ == "__main__":
     main()
