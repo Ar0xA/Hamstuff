@@ -1,4 +1,4 @@
-Recorded 30 min wav file. Played it for each wsjtx session, only changing the decoder setting. Then parsing the ALL.TXT at the end. 
+Recorded 30 min wav file. Played it for each wsjtx session using https://github.com/Ar0xA/Hamstuff/blob/main/ft8performance/play_ft8.py (to fix the DT offset issues), only changing the decoder setting. Then parsing the ALL.TXT at the end. 
 
 WSJTX SETTINGS
 ==============
