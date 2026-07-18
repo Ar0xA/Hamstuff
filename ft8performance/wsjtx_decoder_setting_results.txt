@@ -1,3 +1,6 @@
+Recorded 30 min wav file. Played it for each wsjtx session, only changing the decoder setting. Then parsing the ALL.TXT at the end. These are the results:
+
+
 C:\Users\ar0xa\Documents\comparedecoders>python compare_wsjtx2.py
 Parsing files...
 
