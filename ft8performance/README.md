@@ -11,3 +11,7 @@ Program to play a 48khz sampled .wav to a virtual audio cable input to be ingest
 compare_wsjtx.py
 ----------------
 Program to compare decoding quality of various WSJTX settings. Use the same recording for valid comparison. Ingests wsjtx_norm.txt, wsjtx_2pass.txt, wsjtx_3pass.txt and wsjtx_.late.txt and prints some stats about the decoder performaces.
+
+compare_nexus.py
+----------------
+Program to compare 2 decodes of the Nexus client. Ignores timestamps but looks at the 15s FT8 windows instead for better results.
